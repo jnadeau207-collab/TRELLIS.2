@@ -77,7 +77,7 @@ def _planar_regions(
     unique, inverse = np.unique(keys, axis=0, return_inverse=True)
     total_area = max(float(areas.sum()), 1e-12)
     regions: list[dict[str, Any]] = []
-    for index, key in enumerate(unique):
+    for index, _key in enumerate(unique):
         mask = inverse == index
         area = float(areas[mask].sum())
         if area / total_area < 0.01:
@@ -89,7 +89,14 @@ def _planar_regions(
         weighted_normal /= length
         region_offsets = centers[mask] @ weighted_normal
         offset = float(np.average(region_offsets, weights=areas[mask]))
-        residual = float(np.sqrt(np.average((region_offsets - offset) ** 2, weights=areas[mask])))
+        residual = float(
+            np.sqrt(
+                np.average(
+                    (region_offsets - offset) ** 2,
+                    weights=areas[mask],
+                )
+            )
+        )
         regions.append(
             {
                 "normal": _vector(weighted_normal),
@@ -100,7 +107,11 @@ def _planar_regions(
                 "confidence": float(np.exp(-100.0 * residual / scale)),
             }
         )
-    return sorted(regions, key=lambda item: item["areaFraction"], reverse=True)[:limit]
+    return sorted(
+        regions,
+        key=lambda item: item["areaFraction"],
+        reverse=True,
+    )[:limit]
 
 
 def _cylinder_candidates(
@@ -132,7 +143,10 @@ def _cylinder_candidates(
             continue
         residual = float(np.median(np.abs(radii - radius)) / radius)
         length = float(axial.max() - axial.min())
-        confidence = float(np.exp(-18.0 * residual) * min(1.0, side_area_fraction * 2.0))
+        confidence = float(
+            np.exp(-18.0 * residual)
+            * min(1.0, side_area_fraction * 2.0)
+        )
         if confidence < 0.2:
             continue
         candidates.append(
@@ -146,24 +160,51 @@ def _cylinder_candidates(
                 "confidence": confidence,
             }
         )
-    return sorted(candidates, key=lambda item: item["confidence"], reverse=True)
+    return sorted(
+        candidates,
+        key=lambda item: item["confidence"],
+        reverse=True,
+    )
 
 
 def _sphere_candidate(
-    vertices: np.ndarray, origin: np.ndarray, diagonal: float
+    mesh: trimesh.Trimesh,
+    origin: np.ndarray,
+    diagonal: float,
 ) -> dict[str, Any] | None:
-    radii = np.linalg.norm(vertices - origin, axis=1)
-    radius = float(np.median(radii))
+    centers = np.asarray(mesh.triangles_center, dtype=np.float64)
+    normals = np.asarray(mesh.face_normals, dtype=np.float64)
+    areas = np.asarray(mesh.area_faces, dtype=np.float64)
+    if len(centers) == 0:
+        return None
+    radial = centers - origin
+    radii = np.linalg.norm(radial, axis=1)
+    radius = float(np.average(radii, weights=areas))
     if radius <= max(diagonal, 1e-12) * 1e-4:
         return None
-    residual = float(np.median(np.abs(radii - radius)) / radius)
-    confidence = float(np.exp(-20.0 * residual))
+    residual = float(
+        np.sqrt(np.average((radii - radius) ** 2, weights=areas)) / radius
+    )
+    valid = radii > 1e-12
+    if not np.any(valid):
+        return None
+    radial_directions = radial[valid] / radii[valid, None]
+    normal_alignment = float(
+        np.average(
+            np.abs(np.einsum("ij,ij->i", radial_directions, normals[valid])),
+            weights=areas[valid],
+        )
+    )
+    confidence = float(
+        np.exp(-20.0 * residual) * normal_alignment**4
+    )
     if confidence < 0.2:
         return None
     return {
         "origin": _vector(origin),
         "radius": radius,
         "normalizedResidual": residual,
+        "normalAlignment": normal_alignment,
         "confidence": confidence,
     }
 
@@ -185,14 +226,18 @@ def _edge_summary(mesh: trimesh.Trimesh) -> dict[str, Any]:
 
 
 def _symmetry_scores(
-    vertices: np.ndarray, center: np.ndarray, sample_limit: int = 4096
+    vertices: np.ndarray,
+    center: np.ndarray,
+    sample_limit: int = 4096,
 ) -> list[dict[str, Any]]:
     if len(vertices) > sample_limit:
         indices = np.linspace(0, len(vertices) - 1, sample_limit, dtype=np.int64)
         points = vertices[indices]
     else:
         points = vertices
-    diagonal = float(np.linalg.norm(vertices.max(axis=0) - vertices.min(axis=0)))
+    diagonal = float(
+        np.linalg.norm(vertices.max(axis=0) - vertices.min(axis=0))
+    )
     scale = max(diagonal, 1e-12)
     output = []
     for axis, name in enumerate(("YZ", "XZ", "XY")):
@@ -207,7 +252,11 @@ def _symmetry_scores(
                 "confidence": float(np.exp(-40.0 * normalized)),
             }
         )
-    return sorted(output, key=lambda item: item["confidence"], reverse=True)
+    return sorted(
+        output,
+        key=lambda item: item["confidence"],
+        reverse=True,
+    )
 
 
 def _shape_class(
@@ -216,16 +265,20 @@ def _shape_class(
     sphere: dict[str, Any] | None,
 ) -> tuple[str, float]:
     planar_support = sum(item["areaFraction"] for item in planar[:6])
-    if sphere is not None and sphere["confidence"] >= 0.7:
-        return "spherical", float(sphere["confidence"])
-    if cylinders and cylinders[0]["confidence"] >= 0.55:
-        return "cylindrical", float(cylinders[0]["confidence"])
     if planar_support >= 0.75:
         return "prismatic", float(min(1.0, planar_support))
+    if cylinders and cylinders[0]["confidence"] >= 0.55:
+        return "cylindrical", float(cylinders[0]["confidence"])
+    if sphere is not None and sphere["confidence"] >= 0.7:
+        return "spherical", float(sphere["confidence"])
     return "freeform-or-mixed", float(max(0.1, 1.0 - planar_support))
 
 
-def analyze_mesh(mesh: trimesh.Trimesh, *, source: str | None = None) -> dict[str, Any]:
+def analyze_mesh(
+    mesh: trimesh.Trimesh,
+    *,
+    source: str | None = None,
+) -> dict[str, Any]:
     vertices = np.asarray(mesh.vertices, dtype=np.float64)
     bounds = np.asarray(mesh.bounds, dtype=np.float64)
     extents = bounds[1] - bounds[0]
@@ -236,7 +289,7 @@ def analyze_mesh(mesh: trimesh.Trimesh, *, source: str | None = None) -> dict[st
     components = list(mesh.split(only_watertight=False))
     planar = _planar_regions(mesh, diagonal)
     cylinders = _cylinder_candidates(mesh, origin, axes, diagonal)
-    sphere = _sphere_candidate(vertices, origin, diagonal)
+    sphere = _sphere_candidate(mesh, origin, diagonal)
     shape_class, shape_confidence = _shape_class(planar, cylinders, sphere)
     euler_number = int(mesh.euler_number)
     component_count = max(len(components), 1)
@@ -301,7 +354,9 @@ def analyze_mesh(mesh: trimesh.Trimesh, *, source: str | None = None) -> dict[st
                 },
             }
             for component in sorted(
-                components, key=lambda item: item.area, reverse=True
+                components,
+                key=lambda item: item.area,
+                reverse=True,
             )[:64]
         ],
         "uncertainty": {
