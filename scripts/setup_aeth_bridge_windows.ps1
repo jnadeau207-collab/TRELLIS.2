@@ -2,7 +2,8 @@
 param(
     [string]$Distribution = "Ubuntu",
     [string]$RepoPath = "",
-    [switch]$InstallInference
+    [switch]$InstallInference,
+    [switch]$InstallMaterials
 )
 
 $ErrorActionPreference = "Stop"
@@ -32,7 +33,16 @@ python -m pip install -r requirements-aeth-bridge.txt pytest
 if ($InstallInference) {
     $install += @"
 python -m pip install torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu124
-. ./setup.sh --basic --flash-attn --nvdiffrast --nvdiffrec --cumesh --o-voxel --flexgemm
+. ./setup.sh --basic --flash-attn --cumesh --o-voxel --flexgemm
+"@
+}
+
+if ($InstallMaterials) {
+    if (-not $InstallInference) {
+        throw "-InstallMaterials requires -InstallInference."
+    }
+    $install += @"
+. ./setup.sh --nvdiffrast --nvdiffrec
 "@
 }
 
