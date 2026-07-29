@@ -65,11 +65,45 @@ def test_analysis_and_comparison(tmp_path: Path) -> None:
     report = analyze_path(str(reference_path))
     assert report["mesh"]["watertight"] is True
     assert report["bounds"]["extents"] == [2.0, 3.0, 4.0]
+    assert report["shapeDescriptor"]["classification"] == "prismatic"
+    assert len(report["analyticCandidates"]["planes"]) >= 6
+    assert report["edgeSummary"]["sharpEdgeCount"] >= 12
     comparison = compare_paths(
         str(reference_path), str(candidate_path), sample_count=512, seed=7
     )
     assert comparison["surfaceDistance"]["normalizedMean"] < 0.08
     assert comparison["volumeRelativeError"] == 0.0
+    assert comparison["similarityScore"] > 0.5
+    assert comparison["converged"] is False or isinstance(
+        comparison["converged"], bool
+    )
+
+
+def test_cylinder_evidence(tmp_path: Path) -> None:
+    cylinder = trimesh.creation.cylinder(radius=2.0, height=5.0, sections=64)
+    source = tmp_path / "cylinder.npz"
+    _save(source, cylinder)
+    report = analyze_path(str(source))
+    candidates = report["analyticCandidates"]["cylinders"]
+    assert candidates
+    assert abs(candidates[0]["radius"] - 2.0) < 0.1
+    assert candidates[0]["confidence"] > 0.5
+
+
+def test_scaled_candidate_is_compared_after_alignment(tmp_path: Path) -> None:
+    reference = trimesh.creation.box(extents=[2.0, 3.0, 4.0])
+    candidate = trimesh.creation.box(extents=[20.0, 30.0, 40.0])
+    candidate.apply_translation([100.0, -20.0, 7.0])
+    reference_path = tmp_path / "reference.npz"
+    candidate_path = tmp_path / "candidate.npz"
+    _save(reference_path, reference)
+    _save(candidate_path, candidate)
+    comparison = compare_paths(
+        str(reference_path), str(candidate_path), sample_count=1024, seed=11
+    )
+    assert comparison["alignment"]["mode"] == "center-and-uniform-scale"
+    assert comparison["similarityScore"] > 0.5
+    assert max(comparison["bounds"]["extentRelativeError"]) < 1e-9
 
 
 def test_windows_paths_translate_to_wsl_without_host_filesystem_semantics() -> None:
