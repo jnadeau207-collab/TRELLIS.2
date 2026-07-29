@@ -10,7 +10,7 @@ from typing import Any
 
 import numpy as np
 
-from .meshio import save_npz
+from .meshio import resolve_input_path, save_npz
 from .profiles import ExecutionProfile
 
 
@@ -155,7 +155,7 @@ def generate(
             "PyTorch and Pillow are required for image generation"
         ) from exc
 
-    image_source = Path(image_path).expanduser().resolve()
+    image_source = resolve_input_path(image_path)
     if not image_source.is_file():
         raise ValueError(f"input image does not exist: {image_source}")
 
