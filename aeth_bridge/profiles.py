@@ -15,14 +15,47 @@ class ExecutionProfile:
     resolution: int
     shape_only: bool
     max_tokens: int
-    minimum_vram_gib: int
+    low_vram: bool
+    description: str
 
 
+# Profiles are execution strategies, not hardware promises.  In particular,
+# shape-512 deliberately uses TRELLIS.2's low-VRAM model shuttling and loads no
+# texture models.  A probe can establish CUDA/dependency prerequisites, but only
+# an actual generation run can qualify a specific GPU/driver/input combination.
 PROFILES = {
-    "shape-512": ExecutionProfile("shape-512", 512, True, 24_576, 24),
-    "shape-1024": ExecutionProfile("shape-1024", 1024, True, 49_152, 24),
-    "full-512": ExecutionProfile("full-512", 512, False, 24_576, 24),
-    "full-1024": ExecutionProfile("full-1024", 1024, False, 49_152, 32),
+    "shape-512": ExecutionProfile(
+        "shape-512",
+        512,
+        True,
+        24_576,
+        True,
+        "Shape-only 512 pipeline with one-model-at-a-time CUDA residency; first choice for 12 GiB-class GPUs.",
+    ),
+    "shape-1024": ExecutionProfile(
+        "shape-1024",
+        1024,
+        True,
+        32_768,
+        True,
+        "Shape-only cascade with bounded high-resolution tokens and low-VRAM model shuttling.",
+    ),
+    "full-512": ExecutionProfile(
+        "full-512",
+        512,
+        False,
+        24_576,
+        True,
+        "Geometry and material generation at 512 with low-VRAM model shuttling.",
+    ),
+    "full-1024": ExecutionProfile(
+        "full-1024",
+        1024,
+        False,
+        49_152,
+        True,
+        "Geometry and material cascade at 1024; highest memory demand.",
+    ),
 }
 
 
@@ -48,23 +81,30 @@ def _nvidia() -> list[dict[str, Any]]:
     result = _run(
         [
             "nvidia-smi",
-            "--query-gpu=name,memory.total,driver_version",
+            "--query-gpu=name,memory.total,memory.free,driver_version",
             "--format=csv,noheader,nounits",
         ]
     )
     if result is None or result.returncode != 0:
         return []
-    output = []
+    output: list[dict[str, Any]] = []
     for row in result.stdout.splitlines():
         parts = [part.strip() for part in row.split(",")]
-        if len(parts) != 3:
+        if len(parts) != 4:
             continue
         try:
-            memory_mib = int(parts[1])
+            total_mib = int(parts[1])
+            free_mib = int(parts[2])
         except ValueError:
-            memory_mib = 0
+            total_mib = 0
+            free_mib = 0
         output.append(
-            {"name": parts[0], "memoryMiB": memory_mib, "driverVersion": parts[2]}
+            {
+                "name": parts[0],
+                "memoryMiB": total_mib,
+                "memoryFreeMiB": free_mib,
+                "driverVersion": parts[3],
+            }
         )
     return output
 
@@ -77,17 +117,41 @@ def _module(name: str) -> bool:
         return False
 
 
+def _cuda_state() -> dict[str, Any]:
+    try:
+        import torch
+
+        return {
+            "available": bool(torch.cuda.is_available()),
+            "deviceCount": int(torch.cuda.device_count()),
+            "torchVersion": str(torch.__version__),
+            "cudaVersion": torch.version.cuda,
+        }
+    except Exception:
+        return {
+            "available": False,
+            "deviceCount": 0,
+            "torchVersion": None,
+            "cudaVersion": None,
+        }
+
+
 def probe() -> dict[str, Any]:
     gpus = _nvidia()
     modules = {
         name: _module(name)
         for name in ("torch", "numpy", "trimesh", "PIL", "trellis2")
     }
+    cuda = _cuda_state()
     wsl = bool(os.environ.get("WSL_DISTRO_NAME")) or "microsoft" in platform.release().lower()
-    maximum_vram = max((gpu["memoryMiB"] for gpu in gpus), default=0) / 1024
-    available_profiles = [
-        name for name, value in PROFILES.items() if maximum_vram >= value.minimum_vram_gib
-    ]
+    generation_prerequisites = (
+        modules["torch"]
+        and modules["PIL"]
+        and modules["trellis2"]
+        and cuda["available"]
+        and bool(gpus)
+    )
+    candidate_profiles = list(PROFILES) if generation_prerequisites else []
     return {
         "platform": {
             "system": platform.system(),
@@ -97,12 +161,17 @@ def probe() -> dict[str, Any]:
             "wsl": wsl,
         },
         "gpus": gpus,
+        "cuda": cuda,
         "modules": modules,
         "profiles": {name: asdict(value) for name, value in PROFILES.items()},
-        "availableProfiles": available_profiles,
+        # Kept for protocol compatibility.  "Available" means all software/CUDA
+        # prerequisites exist, not that a guessed VRAM threshold blessed the run.
+        "availableProfiles": candidate_profiles,
+        "recommendedProfile": "shape-512" if generation_prerequisites else None,
+        "qualificationPolicy": "attempt-and-measure",
         "capabilities": {
             "analysis": modules["numpy"] and modules["trimesh"],
-            "generation": modules["torch"] and modules["PIL"] and modules["trellis2"] and bool(gpus),
+            "generation": generation_prerequisites,
             "windowsHostSupported": True,
             "recommendedWindowsBackend": "wsl" if platform.system() == "Windows" else "local",
         },
