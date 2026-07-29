@@ -13,7 +13,12 @@ from typing import Any
 from .analyze import analyze_path
 from .artifacts import atomic_write_json, request_directory, safe_artifact_root, write_manifest
 from .compare import compare_paths
-from .generate import GenerationCancelled, GenerationUnavailable, generate
+from .generate import (
+    GenerationCancelled,
+    GenerationInsufficientMemory,
+    GenerationUnavailable,
+    generate,
+)
 from .profiles import probe, profile
 from .protocol import ProtocolError, Request, event, parse_request, write_event
 
@@ -31,7 +36,14 @@ class BridgeService:
 
     def submit(self, request: Request) -> None:
         if request.request_id in self.tasks:
-            self.emit(event(request.request_id, "error", code="duplicate_request", message="requestId is already active"))
+            self.emit(
+                event(
+                    request.request_id,
+                    "error",
+                    code="duplicate_request",
+                    message="requestId is already active",
+                )
+            )
             return
         cancellation = threading.Event()
         future = self.executor.submit(self.execute, request, cancellation)
@@ -54,8 +66,25 @@ class BridgeService:
             self.emit(event(request.request_id, "completed", result=result))
         except GenerationCancelled as exc:
             self.emit(event(request.request_id, "cancelled", message=str(exc)))
+        except GenerationInsufficientMemory as exc:
+            self.emit(
+                event(
+                    request.request_id,
+                    "error",
+                    code="insufficient_vram",
+                    message=str(exc),
+                    details=exc.details,
+                )
+            )
         except GenerationUnavailable as exc:
-            self.emit(event(request.request_id, "error", code="generation_unavailable", message=str(exc)))
+            self.emit(
+                event(
+                    request.request_id,
+                    "error",
+                    code="generation_unavailable",
+                    message=str(exc),
+                )
+            )
         except Exception as exc:
             self.emit(
                 event(
@@ -83,17 +112,25 @@ class BridgeService:
             files=[report_path],
             metadata={"source": source},
         )
-        return {"reportPath": str(report_path), "manifestPath": str(manifest_path), "report": report}
+        return {
+            "reportPath": str(report_path),
+            "manifestPath": str(manifest_path),
+            "report": report,
+        }
 
     def handle_compare(self, request: Request) -> dict[str, Any]:
         reference = request.payload.get("referencePath")
         candidate = request.payload.get("candidatePath")
         if not isinstance(reference, str) or not isinstance(candidate, str):
-            raise ValueError("compare requires referencePath and candidatePath strings")
+            raise ValueError(
+                "compare requires referencePath and candidatePath strings"
+            )
         sample_count = int(request.payload.get("sampleCount", 4096))
         seed = int(request.payload.get("seed", 42))
         directory = request_directory(self.artifact_root, request.request_id)
-        comparison = compare_paths(reference, candidate, sample_count=sample_count, seed=seed)
+        comparison = compare_paths(
+            reference, candidate, sample_count=sample_count, seed=seed
+        )
         comparison_path = directory / "comparison.json"
         atomic_write_json(comparison_path, comparison)
         manifest_path = write_manifest(
@@ -109,7 +146,9 @@ class BridgeService:
             "comparison": comparison,
         }
 
-    def handle_generate(self, request: Request, cancellation: threading.Event) -> dict[str, Any]:
+    def handle_generate(
+        self, request: Request, cancellation: threading.Event
+    ) -> dict[str, Any]:
         image_path = request.payload.get("imagePath")
         profile_name = request.payload.get("profile", "shape-512")
         model = request.payload.get("model", "microsoft/TRELLIS.2-4B")
@@ -143,31 +182,69 @@ class BridgeService:
     def cancel(self, request: Request) -> None:
         target = request.payload.get("targetRequestId")
         if not isinstance(target, str):
-            self.emit(event(request.request_id, "error", code="invalid_cancel", message="targetRequestId must be a string"))
+            self.emit(
+                event(
+                    request.request_id,
+                    "error",
+                    code="invalid_cancel",
+                    message="targetRequestId must be a string",
+                )
+            )
             return
         active = self.tasks.get(target)
         if active is None:
-            self.emit(event(request.request_id, "completed", result={"cancelled": False, "reason": "not_active"}))
+            self.emit(
+                event(
+                    request.request_id,
+                    "completed",
+                    result={"cancelled": False, "reason": "not_active"},
+                )
+            )
             return
         active[1].set()
-        self.emit(event(request.request_id, "completed", result={"cancelled": True, "targetRequestId": target}))
+        self.emit(
+            event(
+                request.request_id,
+                "completed",
+                result={"cancelled": True, "targetRequestId": target},
+            )
+        )
 
     def run(self) -> int:
-        self.emit(event("bridge", "ready", result={"artifactRoot": str(self.artifact_root)}))
+        self.emit(
+            event(
+                "bridge",
+                "ready",
+                result={"artifactRoot": str(self.artifact_root)},
+            )
+        )
         for line in sys.stdin:
             if not line.strip():
                 continue
             try:
                 request = parse_request(line)
             except ProtocolError as exc:
-                self.emit(event("unknown", "error", code="protocol_error", message=str(exc)))
+                self.emit(
+                    event(
+                        "unknown",
+                        "error",
+                        code="protocol_error",
+                        message=str(exc),
+                    )
+                )
                 continue
             if request.command == "cancel":
                 self.cancel(request)
             elif request.command == "shutdown":
                 for _, cancellation in self.tasks.values():
                     cancellation.set()
-                self.emit(event(request.request_id, "completed", result={"shutdown": True}))
+                self.emit(
+                    event(
+                        request.request_id,
+                        "completed",
+                        result={"shutdown": True},
+                    )
+                )
                 break
             else:
                 self.submit(request)
@@ -176,12 +253,19 @@ class BridgeService:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="TRELLIS.2 deterministic stdio bridge")
+    parser = argparse.ArgumentParser(
+        description="TRELLIS.2 deterministic stdio bridge"
+    )
     parser.add_argument(
         "--artifact-root",
-        default=os.environ.get("AETH_BRIDGE_ARTIFACT_ROOT", str(Path.home() / ".cache" / "aeth-bridge")),
+        default=os.environ.get(
+            "AETH_BRIDGE_ARTIFACT_ROOT",
+            str(Path.home() / ".cache" / "aeth-bridge"),
+        ),
     )
-    parser.add_argument("--probe", action="store_true", help="print a one-shot JSON capability probe")
+    parser.add_argument(
+        "--probe", action="store_true", help="print a one-shot JSON capability probe"
+    )
     arguments = parser.parse_args(argv)
     if arguments.probe:
         json.dump(probe(), sys.stdout, indent=2, sort_keys=True)
