@@ -21,13 +21,20 @@ def running_in_wsl() -> bool:
     return bool(os.environ.get("WSL_DISTRO_NAME")) or "microsoft" in platform.release().lower()
 
 
+def windows_path_to_wsl(value: str) -> str | None:
+    match = _WINDOWS_PATH.match(value)
+    if match is None:
+        return None
+    drive = match.group(1).lower()
+    remainder = match.group(2).replace("\\", "/")
+    return f"/mnt/{drive}/{remainder}"
+
+
 def resolve_input_path(value: str | Path) -> Path:
     raw = str(value)
-    match = _WINDOWS_PATH.match(raw)
-    if match is not None and running_in_wsl():
-        drive = match.group(1).lower()
-        remainder = match.group(2).replace("\\", "/")
-        return Path(f"/mnt/{drive}/{remainder}").expanduser().resolve()
+    translated = windows_path_to_wsl(raw)
+    if translated is not None and running_in_wsl():
+        return Path(translated).expanduser().resolve()
     return Path(raw).expanduser().resolve()
 
 
