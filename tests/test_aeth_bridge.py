@@ -11,7 +11,7 @@ from aeth_bridge import profiles
 from aeth_bridge.analyze import analyze_path
 from aeth_bridge.artifacts import build_manifest, request_directory, safe_artifact_root
 from aeth_bridge.compare import compare_paths
-from aeth_bridge.meshio import resolve_input_path
+from aeth_bridge.meshio import windows_path_to_wsl
 from aeth_bridge.protocol import PROTOCOL_VERSION, ProtocolError, parse_request
 
 
@@ -72,11 +72,11 @@ def test_analysis_and_comparison(tmp_path: Path) -> None:
     assert comparison["volumeRelativeError"] == 0.0
 
 
-def test_windows_paths_are_translated_inside_wsl(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("WSL_DISTRO_NAME", "Ubuntu")
-    assert resolve_input_path(r"C:\designs\reference.png") == Path(
+def test_windows_paths_translate_to_wsl_without_host_filesystem_semantics() -> None:
+    assert windows_path_to_wsl(r"C:\designs\reference.png") == (
         "/mnt/c/designs/reference.png"
     )
+    assert windows_path_to_wsl("/home/user/reference.png") is None
 
 
 def test_probe_reports_candidate_profiles_without_guessing_a_vram_floor(
