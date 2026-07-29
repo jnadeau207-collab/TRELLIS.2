@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import platform
+import re
 from pathlib import Path
 from typing import Any
 
@@ -11,11 +14,32 @@ class MeshError(ValueError):
     pass
 
 
+_WINDOWS_PATH = re.compile(r"^([A-Za-z]):[\\/](.*)$")
+
+
+def running_in_wsl() -> bool:
+    return bool(os.environ.get("WSL_DISTRO_NAME")) or "microsoft" in platform.release().lower()
+
+
+def resolve_input_path(value: str | Path) -> Path:
+    raw = str(value)
+    match = _WINDOWS_PATH.match(raw)
+    if match is not None and running_in_wsl():
+        drive = match.group(1).lower()
+        remainder = match.group(2).replace("\\", "/")
+        return Path(f"/mnt/{drive}/{remainder}").expanduser().resolve()
+    return Path(raw).expanduser().resolve()
+
+
 def _as_mesh(value: Any) -> trimesh.Trimesh:
     if isinstance(value, trimesh.Trimesh):
         return value
     if isinstance(value, trimesh.Scene):
-        geometries = [g for g in value.geometry.values() if isinstance(g, trimesh.Trimesh)]
+        geometries = [
+            geometry
+            for geometry in value.geometry.values()
+            if isinstance(geometry, trimesh.Trimesh)
+        ]
         if not geometries:
             raise MeshError("scene contains no triangle mesh")
         return trimesh.util.concatenate(geometries)
@@ -23,7 +47,7 @@ def _as_mesh(value: Any) -> trimesh.Trimesh:
 
 
 def load_mesh(path: str | Path) -> trimesh.Trimesh:
-    source = Path(path).expanduser().resolve()
+    source = resolve_input_path(path)
     if not source.is_file():
         raise MeshError(f"mesh file does not exist: {source}")
     if source.suffix.lower() == ".npz":
