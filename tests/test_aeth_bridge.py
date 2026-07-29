@@ -7,14 +7,18 @@ import numpy as np
 import pytest
 import trimesh
 
+from aeth_bridge import profiles
 from aeth_bridge.analyze import analyze_path
 from aeth_bridge.artifacts import build_manifest, request_directory, safe_artifact_root
 from aeth_bridge.compare import compare_paths
+from aeth_bridge.meshio import resolve_input_path
 from aeth_bridge.protocol import PROTOCOL_VERSION, ProtocolError, parse_request
 
 
 def _save(path: Path, mesh: trimesh.Trimesh) -> None:
-    np.savez_compressed(path, vertices=np.asarray(mesh.vertices), faces=np.asarray(mesh.faces))
+    np.savez_compressed(
+        path, vertices=np.asarray(mesh.vertices), faces=np.asarray(mesh.faces)
+    )
 
 
 def test_parse_request() -> None:
@@ -68,6 +72,46 @@ def test_analysis_and_comparison(tmp_path: Path) -> None:
     assert comparison["volumeRelativeError"] == 0.0
 
 
+def test_windows_paths_are_translated_inside_wsl(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WSL_DISTRO_NAME", "Ubuntu")
+    assert resolve_input_path(r"C:\designs\reference.png") == Path(
+        "/mnt/c/designs/reference.png"
+    )
+
+
+def test_probe_reports_candidate_profiles_without_guessing_a_vram_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        profiles,
+        "_nvidia",
+        lambda: [
+            {
+                "name": "Test GPU",
+                "memoryMiB": 12_288,
+                "memoryFreeMiB": 10_240,
+                "driverVersion": "test",
+            }
+        ],
+    )
+    monkeypatch.setattr(profiles, "_module", lambda _name: True)
+    monkeypatch.setattr(
+        profiles,
+        "_cuda_state",
+        lambda: {
+            "available": True,
+            "deviceCount": 1,
+            "torchVersion": "test",
+            "cudaVersion": "test",
+        },
+    )
+    result = profiles.probe()
+    assert result["recommendedProfile"] == "shape-512"
+    assert result["qualificationPolicy"] == "attempt-and-measure"
+    assert "shape-512" in result["availableProfiles"]
+    assert "minimum_vram_gib" not in result["profiles"]["shape-512"]
+
+
 def test_stdio_probe_and_shutdown(tmp_path: Path) -> None:
     process = subprocess.Popen(
         [sys.executable, "-m", "aeth_bridge", "--artifact-root", str(tmp_path)],
@@ -88,6 +132,7 @@ def test_stdio_probe_and_shutdown(tmp_path: Path) -> None:
     completed = json.loads(process.stdout.readline())
     assert started["kind"] == "started"
     assert completed["kind"] == "completed"
+    assert completed["result"]["qualificationPolicy"] == "attempt-and-measure"
     process.stdin.write(
         '{"version":1,"requestId":"stop","command":"shutdown","payload":{}}\n'
     )
