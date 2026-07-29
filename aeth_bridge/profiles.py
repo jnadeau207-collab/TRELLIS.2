@@ -19,8 +19,8 @@ class ExecutionProfile:
 
 
 PROFILES = {
-    "shape-512": ExecutionProfile("shape-512", 512, True, 24_576, 12),
-    "shape-1024": ExecutionProfile("shape-1024", 1024, True, 49_152, 20),
+    "shape-512": ExecutionProfile("shape-512", 512, True, 24_576, 24),
+    "shape-1024": ExecutionProfile("shape-1024", 1024, True, 49_152, 24),
     "full-512": ExecutionProfile("full-512", 512, False, 24_576, 24),
     "full-1024": ExecutionProfile("full-1024", 1024, False, 49_152, 32),
 }
